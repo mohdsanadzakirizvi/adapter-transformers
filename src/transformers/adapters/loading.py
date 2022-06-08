@@ -164,6 +164,8 @@ class WeightsLoaderHelper:
             logger.info(
                 "Some module weights could not be found in loaded weights file: {}".format(", ".join(missing_keys))
             )
+        if self.model._keys_to_ignore_on_load_unexpected:
+            unexpected_keys = [k for k in unexpected_keys if k not in self.model._keys_to_ignore_on_load_unexpected]
         if len(unexpected_keys) > 0:
             logger.info(
                 "Some weights of the state_dict could not be loaded into model: {}".format(", ".join(unexpected_keys))
@@ -303,6 +305,7 @@ class AdapterLoader(WeightsLoader):
             lambda x: "_adapters.{}.".format(adapter_name) in x
             or ".adapters.{}.".format(adapter_name) in x
             or ".prefix_tunings.{}.".format(adapter_name) in x
+            or ".loras.{}.".format(adapter_name) in x
         )
 
     # This dict maps the original weight names to the currently used equivalents.
@@ -345,6 +348,7 @@ class AdapterLoader(WeightsLoader):
             lambda k: self._rename_legacy_weights(k)
             .replace("adapters.{}.".format(old_name), "adapters.{}.".format(new_name))
             .replace(".prefix_tunings.{}.".format(old_name), ".prefix_tunings.{}.".format(new_name))
+            .replace(".loras.{}.".format(old_name), ".loras.{}.".format(new_name))
         )
 
     def save(self, save_directory, name, meta_dict=None):
@@ -537,11 +541,12 @@ class AdapterFusionLoader(WeightsLoader):
         config = self.weights_helper.load_weights_config(save_directory)
 
         adapter_fusion_name = load_as or config["name"]
-        if adapter_fusion_name in self.model.config.adapters.fusions:
+        if adapter_fusion_name not in self.model.config.adapters.fusions:
+            self.model.add_adapter_fusion(
+                adapter_fusion_name, config["config"], overwrite_ok=True, set_active=kwargs.pop("set_active", True)
+            )
+        else:
             logger.warning("Overwriting existing adapter fusion module '{}'".format(adapter_fusion_name))
-        self.model.add_adapter_fusion(
-            adapter_fusion_name, config["config"], overwrite_ok=True, set_active=kwargs.pop("set_active", True)
-        )
 
         # Load AdapterFusion weights
         filter_func = self.filter_func(adapter_fusion_name)

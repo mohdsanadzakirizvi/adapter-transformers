@@ -15,6 +15,7 @@ from .context import AdapterSetup, ForwardContext
 from .hub_mixin import PushAdapterToHubMixin
 from .layer import AdapterLayer, AdapterLayerBase
 from .loading import AdapterFusionLoader, AdapterLoader, PredictionHeadLoader, WeightsLoader
+from .lora import LoRALayer
 from .modeling import Adapter, GLOWCouplingBlock, NICECouplingBlock
 from .prefix_tuning import PrefixTuningPool, PrefixTuningShim
 from .utils import EMBEDDING_FILE, TOKENIZER_PATH, inherit_doc
@@ -231,6 +232,8 @@ class ModelAdaptersMixin(PushAdapterToHubMixin, ABC):
                         f"No adapter with name '{adapter_name}' found. Please make sure that all specified adapters are correctly loaded."
                     )
 
+        # Make sure LoRA is reset
+        self.reset_lora()
         self.config.adapters.active_setup = adapter_setup
         self.config.adapters.skip_layers = skip_layers
 
@@ -596,7 +599,7 @@ class ModelAdaptersMixin(PushAdapterToHubMixin, ABC):
         This method is called by the ``ForwardContext`` at the beginning of the forward pass.
         """
         # some warnings if we don't use available adapters
-        active_adapters = getattr(self, "active_adapters", None) or AdapterSetup.get_context()
+        active_adapters = getattr(self, "active_adapters", None) or AdapterSetup.get_context_adapter_setup()
         if not active_adapters:
             if self.has_adapters():
                 logger.warning("There are adapters available but none are activated for the forward pass.")
@@ -608,15 +611,7 @@ class ModelAdaptersMixin(PushAdapterToHubMixin, ABC):
             name: param for name, param in self.shared_parameters.items() if name in active_adapters.flatten()
         }
 
-        # Prefix tuning
-        input_tensor = kwargs.get("input_ids", None)
-        if input_tensor is None:
-            input_tensor = kwargs.get("decoder_input_ids", None)
-        if input_tensor is None:
-            input_tensor = kwargs.get("attention_mask", None)
-        if input_tensor is None:
-            input_tensor = args[0]
-        context.prefix_states = self.base_model.prefix_tuning(input_tensor.shape[0])
+        context.prefix_states = self.base_model.prefix_tuning(*args, **kwargs)
 
     def load_embeddings(self, path: str, name: str):
         """
@@ -785,6 +780,26 @@ class ModelAdaptersMixin(PushAdapterToHubMixin, ABC):
                 if name in module.prefix_tunings:
                     module.prefix_tunings[name].eject()
 
+    def merge_lora(self, name: str):
+        """
+        Merges the weights of the given LoRA module with the Transformer weights as described in the paper.
+
+        Args:
+            name (str): LoRA module to merge.
+        """
+        for module in self.modules():
+            if isinstance(module, LoRALayer):
+                if name in module.loras:
+                    module.merge_lora(name)
+
+    def reset_lora(self):
+        """
+        Resets weights of a LoRA module merged using `model.merge_lora(name)`.
+        """
+        for module in self.modules():
+            if isinstance(module, LoRALayer):
+                module.reset_lora()
+
 
 @inherit_doc
 class ModelWithHeadsAdaptersMixin(ModelAdaptersMixin):
@@ -931,15 +946,21 @@ class ModelWithHeadsAdaptersMixin(ModelAdaptersMixin):
         meta_dict: dict = None,
         custom_weights_loaders: Optional[List[WeightsLoader]] = None,
     ):
-        if with_head:
-            if custom_weights_loaders is None:
-                custom_weights_loaders = []
-            custom_weights_loaders.append(PredictionHeadLoader(self, error_on_missing=False))
-        super().save_all_adapters(
-            save_directory,
-            meta_dict=meta_dict,
-            custom_weights_loaders=custom_weights_loaders,
-        )
+        for name in self.config.adapters:
+            adapter_config = self.config.adapters.get(name)
+            h = get_adapter_config_hash(adapter_config)
+            save_path = join(save_directory, name)
+            if meta_dict:
+                meta_dict.update({"config_id": h})
+            else:
+                meta_dict = {"config_id": h}
+            self.save_adapter(
+                save_path,
+                name,
+                meta_dict=meta_dict,
+                with_head=with_head,
+                custom_weights_loaders=custom_weights_loaders,
+            )
 
     def save_adapter_fusion(
         self,

@@ -83,6 +83,8 @@ class AdapterConfigBase(Mapping):
         architecture = config_dict.get("architecture", None)
         if architecture == "prefix_tuning":
             cls_new = PrefixTuningConfig
+        elif architecture == "lora":
+            cls_new = LoRAConfig
         elif architecture == "union":
             cls_new = ConfigUnion
         else:
@@ -136,10 +138,11 @@ class AdapterConfig(AdapterConfigBase):
     Args:
         mh_adapter (:obj:`bool`): If True, add adapter modules after the multi-head attention block of each layer.
         output_adapter (:obj:`bool`): If True, add adapter modules after the output FFN of each layer.
-        reduction_factor (:obj:`int` or :obj:`Mapping`):
-            Either an integer specifying the reduction factor for all layers or a mapping specifying the
+        reduction_factor (:obj:`float` or :obj:`Mapping`):
+            Either a scalar float (> 0) specifying the reduction factor for all layers or a mapping specifying the
             reduction_factor for individual layers. If not all layers are represented in the mapping a default value
-            should be given e.g. {'1': 8, '6': 32, 'default': 16}
+            should be given e.g. {'1': 8, '6': 32, 'default': 16}. Specifying a reduction factor < 1 will result in an
+            up-projection layer.
         non_linearity (:obj:`str`): The activation function to use in the adapter bottleneck.
         original_ln_before (:obj:`bool`, optional):
             If True, apply layer pre-trained normalization and residual connection before the adapter modules. Defaults
@@ -168,7 +171,7 @@ class AdapterConfig(AdapterConfigBase):
         inv_adapter (:obj:`str`, optional):
             If not None (default), add invertible adapter modules after the model embedding layer. Currently, this can
             be either "nice" or "glow".
-        inv_adapter_reduction_factor (:obj:`int`, optional):
+        inv_adapter_reduction_factor (:obj:`float`, optional):
             The reduction to use within the invertible adapter modules. Only applicable if :obj:`inv_adapter` is not
             None.
         cross_adapter (:obj:`bool`, optional):
@@ -210,7 +213,7 @@ class AdapterConfig(AdapterConfigBase):
     mh_adapter: bool
     output_adapter: bool
 
-    reduction_factor: Union[int, Mapping]
+    reduction_factor: Union[float, Mapping]
     non_linearity: str
 
     # Options with defaults
@@ -224,7 +227,7 @@ class AdapterConfig(AdapterConfigBase):
     residual_before_ln: bool = True
     adapter_residual_before_ln: bool = False
     inv_adapter: Optional[str] = None
-    inv_adapter_reduction_factor: Optional[int] = None
+    inv_adapter_reduction_factor: Optional[float] = None
     cross_adapter: bool = False
     leave_out: List[int] = field(default_factory=list)
     phm_layer: bool = False
@@ -270,13 +273,13 @@ class PfeifferConfig(AdapterConfig):
     mh_adapter: bool = False
     output_adapter: bool = True
     non_linearity: str = "relu"
-    reduction_factor: Union[int, Mapping] = 16
+    reduction_factor: Union[float, Mapping] = 16
 
 
 @dataclass(eq=False)
 class CompacterPlusPlusConfig(PfeifferConfig):
     phm_layer: bool = True
-    reduction_factor: int = 32
+    reduction_factor: Union[float, Mapping] = 32
     non_linearity: str = "gelu"
 
 
@@ -287,7 +290,7 @@ class PfeifferInvConfig(PfeifferConfig):
     """
 
     inv_adapter: Optional[str] = "nice"
-    inv_adapter_reduction_factor: Optional[int] = 2
+    inv_adapter_reduction_factor: Optional[float] = 2
 
 
 @dataclass(eq=False)
@@ -305,13 +308,13 @@ class HoulsbyConfig(AdapterConfig):
     mh_adapter: bool = True
     output_adapter: bool = True
     non_linearity: str = "swish"
-    reduction_factor: Union[int, Mapping] = 16
+    reduction_factor: Union[float, Mapping] = 16
 
 
 @dataclass(eq=False)
 class CompacterConfig(HoulsbyConfig):
     phm_layer: bool = True
-    reduction_factor: int = 32
+    reduction_factor: Union[float, Mapping] = 32
     non_linearity: str = "gelu"
 
 
@@ -322,7 +325,7 @@ class HoulsbyInvConfig(HoulsbyConfig):
     """
 
     inv_adapter: Optional[str] = "nice"
-    inv_adapter_reduction_factor: Optional[int] = 2
+    inv_adapter_reduction_factor: Optional[float] = 2
 
 
 @dataclass(eq=False)
@@ -338,7 +341,7 @@ class ParallelConfig(AdapterConfig):
     mh_adapter: bool = False
     output_adapter: bool = True
     non_linearity: str = "relu"
-    reduction_factor: Union[int, Mapping] = 2
+    reduction_factor: Union[float, Mapping] = 2
 
     init_weights: str = "mam_adapter"
     is_parallel: bool = True
@@ -372,6 +375,39 @@ class PrefixTuningConfig(AdapterConfigBase):
     bottleneck_size: int = 512
     non_linearity: str = "tanh"
     dropout: float = 0.0
+
+
+@dataclass(eq=False)
+class LoRAConfig(AdapterConfigBase):
+    """
+    The Low-Rank Adaptation (LoRA) architecture proposed by Hu et al. (2021). See https://arxiv.org/pdf/2106.09685.pdf.
+    LoRA adapts a model by reparametrizing the weights of a layer matrix. You can merge the additional weights with the
+    original layer weights using ``model.merge_lora("lora_name")``.
+
+    Args:
+        selfattn_lora (bool, optional): If True, add LoRA to the self-attention weights of a model.
+            Defaults to True.
+        intermediate_lora (bool, optional): If True, add LoRA to the intermediate MLP weights of a model.
+            Defaults to False.
+        output_lora (bool, optional): If True, add LoRA to the output MLP weights of a model.
+            Defaults to False.
+        r (int, optional): The rank of the LoRA layer. Defaults to 8.
+        alpha (int, optional): The hyperparameter used for scaling the LoRA reparametrization. Defaults to 8.
+        dropout (float, optional): The dropout rate used in the LoRA layer. Defaults to 0.0.
+        init_weights (:obj:`str`, optional): Initialization method for the weights of the LoRA modules.
+            Currently, this can be either "lora" (default) or "bert".
+    """
+
+    architecture: Optional[str] = "lora"
+
+    selfattn_lora: bool = True
+    intermediate_lora: bool = False
+    output_lora: bool = False
+
+    r: int = 8
+    alpha: int = 8
+    dropout: float = 0.0
+    init_weights: str = "lora"
 
 
 class ConfigUnion(AdapterConfigBase):
@@ -493,6 +529,7 @@ ADAPTER_CONFIG_MAP = {
     "prefix_tuning_flat": PrefixTuningConfig(flat=True),
     "parallel": ParallelConfig(),
     "scaled_parallel": ParallelConfig(scaling="learned"),
+    "lora": LoRAConfig(),
     "mam": MAMConfig(),
 }
 
